@@ -1,0 +1,244 @@
+---
+title: "Weight Lifting Exercise Predictive Model"
+author: "ALee"
+date: '2022-05-23'
+output: html_document
+---
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Required Packages
+```{r}
+library(caret) # for the confusionmatrix() function (also needs e1071 package)
+library(e1071)
+library(dplyr)
+library(ggplot2)
+library(xgboost)  # the main algorithm
+library(Ckmeans.1d.dp) # for xgb.ggplot.importance
+```
+
+# Background
+The goal of this project is to predict the manner in which the participants did the exercise. This is the "classe" variable in the training set. We select as many variables to predict the outcome, which is multiclass. The report includes describing how the model is built, how we used cross validation, quantify the expected out of sample error, and why the choices were made. At the end we will use the prediction model to predict 20 different test cases.
+
+As this is a multiclass prediction we use "multi:softprob" as the objective function and "mlogloss" as a metric for model evaluation.
+
+# Load Data
+```{r load}
+
+training <- read.csv("pml-training.csv")  #19622x160
+
+testing <- read.csv("pml-testing.csv")    #20x160
+
+```
+
+# Selected Features for Modeling
+```{r 2models}
+# two lists of features 54 features and smaller subset of 17 features
+
+cols <- list("classe", "num_window",	
+         "roll_belt",	"pitch_belt", "yaw_belt",	
+         "total_accel_belt",
+         "gyros_belt_x",	"gyros_belt_y",	"gyros_belt_z",	
+         "accel_belt_x",	"accel_belt_y",	"accel_belt_z",	
+         "magnet_belt_x",	"magnet_belt_y",	"magnet_belt_z",	
+         "roll_arm",	"pitch_arm",	"yaw_arm",	
+         "total_accel_arm",
+         "gyros_arm_x",	"gyros_arm_y",	"gyros_arm_z",	
+         "accel_arm_x",	"accel_arm_y",	"accel_arm_z",	
+         "magnet_arm_x",	"magnet_arm_y",	"magnet_arm_z",
+         "roll_dumbbell",	"pitch_dumbbell",	"yaw_dumbbell",
+         "total_accel_dumbbell",
+         "gyros_dumbbell_x",	"gyros_dumbbell_y",	"gyros_dumbbell_z",	
+         "accel_dumbbell_x",	"accel_dumbbell_y",	"accel_dumbbell_z",	
+         "magnet_dumbbell_x",	"magnet_dumbbell_y",	"magnet_dumbbell_z",	
+         "roll_forearm",	"pitch_forearm",	"yaw_forearm",
+         "total_accel_forearm",
+         "gyros_forearm_x",	"gyros_forearm_y",	"gyros_forearm_z",	
+         "accel_forearm_x",	"accel_forearm_y",	"accel_forearm_z",	
+         "magnet_forearm_x",	"magnet_forearm_y",	"magnet_forearm_z")
+
+cols_sm <- list("classe", 
+                "roll_belt", "pitch_belt", "yaw_belt", "total_accel_belt", 
+                "roll_arm",	"pitch_arm",	"yaw_arm",	"total_accel_arm",
+                "roll_dumbbell",	"pitch_dumbbell",	"yaw_dumbbell", "total_accel_dumbbell",
+                "roll_forearm",	"pitch_forearm",	"yaw_forearm", "total_accel_forearm")
+```
+
+# XGBoost Algorithm
+The XGBoost algorithm requires that the class labels (classe names) start at 0 and increase sequentially to the maximum number of classes. This is a bit of an inconvenience as you need to keep track of what classe name goes with which label. Also, you need to be very careful when you add or remove a 1 to go from the zero based labels to the 1 based labels.
+
+## Full Model
+The full model has 54 features.
+```{r full, eval=FALSE}
+training <- training[, names(training) %in% cols]
+
+cols1 <- cols[-1]        #remove classe from testing
+
+testing <- testing[, names(testing) %in% cols1]
+
+```
+
+## Smaller Model
+Run either the full model in previous section or the smaller model here. This model has only
+17 features.
+```{r small}
+training <- training[, names(training) %in% cols_sm]  #19622x17
+
+cols_sm1 <- cols_sm[-1]  #remove classe from testing
+
+testing <- testing[, names(testing) %in% cols_sm1]     #20x16
+
+```
+
+## Data Preparation
+Here is where we:
+
+- Load the pml-training dataset
+- Convert the variable classe from character to factor and to numeric
+- Subtract 1 from the classe names so they start at 0
+- Print out a summary()
+
+```{r dataprep}
+
+training$classe <- as.numeric(factor(training$classe)) - 1
+
+summary(training)
+
+```
+
+## Split Training Dataset into Training and Validate Datasets
+```{r split}
+
+set.seed(12345)
+# Make split index
+train_index <- sample(1:nrow(training), nrow(training)*0.80)  #15697 = 19622 x 0.8
+
+# Full data set - train and validate
+data_variables <- as.matrix(training[,-17])
+data_label <- training[,"classe"]
+data_matrix <- xgb.DMatrix(data = as.matrix(training), label = data_label)
+
+# split train data and make xgb.DMatrix
+train_data   <- data_variables[train_index,]                    #15697
+train_label  <- data_label[train_index]
+train_matrix <- xgb.DMatrix(data = train_data, label = train_label)
+
+# split validate data and make xgb.DMatrix
+validate_data  <- data_variables[-train_index,]                 #3925
+validate_label <- data_label[-train_index]
+validate_matrix <- xgb.DMatrix(data = validate_data, label = validate_label)
+```
+
+## Model Specifications
+```{r mod_sp}
+numberOfClasses <- length(unique(training$classe))
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = numberOfClasses)
+nround    <- 50 # number of XGBoost rounds
+cv.nfold  <- 5
+
+# Fit cv.nfold * cv.nround XGB models and save OOF predictions
+cv_model <- xgb.cv(params = xgb_params,
+                   data = train_matrix, 
+                   nrounds = nround,
+                   nfold = cv.nfold,
+                   verbose = FALSE,
+                   prediction = TRUE)
+```
+
+## Out-of-Fold (OOF) Error
+```{r ooo}
+OOF_prediction <- data.frame(cv_model$pred) %>%
+  mutate(max_prob = max.col(., ties.method = "last"),
+         label = train_label + 1)
+head(OOF_prediction)
+```
+
+## Confusion Matrix of Holdout
+```{r cm_ooo}
+# confusion matrix
+confusionMatrix(factor(OOF_prediction$max_prob),
+                factor(OOF_prediction$label),
+                mode = "everything")
+```
+
+## Model Performance on the Validate Dataset
+```{r mp_v}
+bst_model <- xgb.train(params = xgb_params,
+                       data = train_matrix,
+                       nrounds = nround)
+
+# Predict hold-out validate dataset
+validate_pred <- predict(bst_model, newdata = validate_matrix)
+validate_prediction <- matrix(validate_pred, nrow = numberOfClasses,
+                          ncol=length(validate_pred)/numberOfClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(label = validate_label + 1,
+         max_prob = max.col(., "last"))
+# confusion matrix of test set
+confusionMatrix(factor(validate_prediction$max_prob),
+                factor(validate_prediction$label),
+                mode = "everything")
+```
+
+## Prediction on the Test Data
+The results are in the last column of the data frame test_prediction, that gives the classe of A=1, B=2, C=3, D=4 and E=5
+```{r mp_t}
+
+test_matrix <- as.matrix(testing)
+
+# Predict on the new test data
+#test_pred <- predict(bst_model, newdata = test_matrix)
+  
+# Predict hold-out validate dataset
+test_pred <- predict(bst_model, newdata = test_matrix)
+test_prediction <- matrix(test_pred, nrow = numberOfClasses,
+                          ncol=length(test_pred)/numberOfClasses) %>%
+  t() %>%
+  data.frame() %>%
+  mutate(max_prob = max.col(., "last"))
+
+```
+
+## Feature Importance
+The final step in this process, and potentially the first step in a process of understanding the model, is assessing variable importance. Basically, this is a way of using all the splits in the XGBoost trees to understand how accurate the classifications are based on the splits. This is quantified with the Gain measurement in the variable importance table obtained from the xgb.importance() function. According to the XGBoost documentation:
+
+>Gain is the improvement in accuracy brought by a feature to the branches it is on.
+The idea is that before adding a new split on a feature X to the branch there was 
+some wrongly classified elements, after adding the split on this feature, there are 
+two new branches, and each of these branch is more accurate (one branch saying if 
+your observation is on this branch then it should be classified as 1, and the other 
+branch saying the exact opposite).
+>
+
+```{r fi}
+
+# get the feature real names
+names <-  colnames(training[,-17])
+
+# compute feature importance matrix
+importance_matrix = xgb.importance(feature_names = names, model = bst_model)
+
+head(importance_matrix)
+
+```
+
+## Feature Importance Plot
+The convenient xgb.plot.importance() function takes the Gain information and plots it using ggplot2. The variables are also clustered using k-means clustering that optimizes k based on Bayesian Information Criteria (BIC) for k=1 to k=10, or you can pass a specific k. Here we can see that elements roll_belt, yaw_belt, and pitch_forearm are apparently the most important in classifying each artifact to the accuracy demonstrated by bst_model given the data and hyper-parameters.
+
+```{r fi_plot}
+# plot
+gp = xgb.ggplot.importance(importance_matrix)
+
+print(gp) 
+```
+
+# Conclusion
+As this is a multiclass prediction, logistic regression (binary) is not applicable. We select XGBoost algorithm as it has outperformed many algorithms, especially winning many machine learning competitions.
+
+With a selected subset of features we are able to achieve very high accuracy and score 100% on the quiz. 
